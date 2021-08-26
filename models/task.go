@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 
@@ -31,11 +33,6 @@ type Task struct {
 	Envs    []Env `gorm:"-"`
 }
 
-type Env struct {
-	Name  string
-	Value string
-}
-
 func initTask() {
 	// for i := range Config.Tasks {
 	// 	if Config.Tasks[i].Cron != "" {
@@ -46,7 +43,7 @@ func initTask() {
 
 func createTask(task *Task) {
 	id, err := c.AddFunc(task.Cron, func() {
-		runTask(task)
+		runTask(task, &Sender{})
 	})
 	if err != nil {
 		logs.Warn(task.Word, "任务创建失败")
@@ -56,7 +53,7 @@ func createTask(task *Task) {
 	}
 }
 
-func runTask(task *Task, msgs ...interface{}) string {
+func runTask(task *Task, sender *Sender) string {
 	task.Running = True
 	path := ""
 	if task.Git != "" {
@@ -109,17 +106,17 @@ func runTask(task *Task, msgs ...interface{}) string {
 	if strings.Contains(task.Name, ".py") {
 		lan = Config.Python
 	}
-	// envs := ""
-	// for _, env := range task.Envs {
-	// 	envs += fmt.Sprintf("export %s=\"%s\"", env.Name, env.Value)
-	// }
-	// 	sh := fmt.Sprintf(`
-	// %s
-	// %s %s
-	// 	`, envs,
-	// 		lan, task.Name)
-	// cmd := exec.Command("sh", "-c", sh)
 	cmd := exec.Command(lan, task.Name)
+	pins := ""
+	for _, env := range GetEnvs() {
+		if env.Name+".js" == task.Name && env.Value != "" {
+			for _, ck := range LimitJdCookie(GetJdCookies(), env.Value) {
+				pins += "&" + ck.PtPin
+			}
+		}
+		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", env.Name, env.Value))
+	}
+	cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", "pins", pins))
 	for _, env := range task.Envs {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", env.Name, env.Value))
 	}
@@ -150,7 +147,7 @@ func runTask(task *Task, msgs ...interface{}) string {
 			msg += line
 		}
 		if msg != "" {
-			sendMessagee(msg, msgs...)
+			sender.Reply(msg)
 		}
 	}()
 	msg := ""
@@ -161,17 +158,61 @@ func runTask(task *Task, msgs ...interface{}) string {
 		if err2 != nil || io.EOF == err2 {
 			break
 		}
+		if task.Name == "jd_get_share_code.js" {
+			rt := findShareCode(line)
+			if rt != "" {
+				sender.Reply(rt)
+			}
+		}
 		msg += line
 		nt := time.Now()
 		if (nt.Unix() - st.Unix()) > 1 {
-			go sendMessagee(msg, msgs...)
+			sender.Reply(msg)
 			st = nt
 			msg = ""
 		}
 	}
 	if msg != "" {
-		sendMessagee(msg, msgs...)
+		sender.Reply(msg)
 	}
 	task.Running = False
 	return msg
+}
+
+func findShareCode(msg string) string {
+	o := false
+	for _, v := range regexp.MustCompile(`京东账号\d*（(.*)）(.*)】(\S*)`).FindAllStringSubmatch(msg, -1) {
+		if !strings.Contains(v[3], "种子") && !strings.Contains(v[3], "undefined") {
+			pt_pin := url.QueryEscape(v[1])
+			for key, ss := range map[string][]string{
+				"Fruit":        {"京东农场", "东东农场"},
+				"Pet":          {"京东萌宠"},
+				"Bean":         {"种豆得豆"},
+				"JdFactory":    {"东东工厂"},
+				"DreamFactory": {"京喜工厂"},
+				"Jxnc":         {"京喜农场"},
+				"Jdzz":         {"京东赚赚"},
+				"Joy":          {"crazyJoy"},
+				"Sgmh":         {"闪购盲盒"},
+				"Cfd":          {"财富岛"},
+				"Cash":         {"签到领现金"},
+			} {
+				for _, s := range ss {
+					if strings.Contains(v[2], s) && v[3] != "" {
+						if ck, err := GetJdCookie(pt_pin); err == nil {
+							ck.Update(key, v[3])
+						}
+						if !o {
+							o = true
+						}
+					}
+				}
+			}
+		}
+	}
+	if o {
+		return "导入互助码成功"
+	} else {
+		return ""
+	}
 }
